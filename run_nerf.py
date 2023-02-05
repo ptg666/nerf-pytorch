@@ -25,10 +25,12 @@ DEBUG = False
 
 
 def batchify(fn, chunk):
+    # 每次前向传播
     """Constructs a version of 'fn' that applies to smaller batches.
     """
     if chunk is None:
         return fn
+    # 输入为 63 维
     def ret(inputs):
         return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
     return ret
@@ -37,16 +39,21 @@ def batchify(fn, chunk):
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
+    # 用于渲染时输入到 fine 网络，使用 reshape 展开
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
+    # 将输入位置编码
     embedded = embed_fn(inputs_flat)
-
+    # 
     if viewdirs is not None:
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = torch.cat([embedded, embedded_dirs], -1)
-
+    # 按照 batch 将输入拆分，并输入网络中
+    # 其中，batchify 函数是为了防止内存溢出
+    # 将经过 PE 的位置信息输入 fn 精细网络
     outputs_flat = batchify(fn, netchunk)(embedded)
+    # 输出为
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
 
@@ -178,26 +185,32 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
+    # 位置编码
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
 
     input_ch_views = 0
     embeddirs_fn = None
+    # 是否加入视角，再进行位置编码
     if args.use_viewdirs:
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
     output_ch = 5 if args.N_importance > 0 else 4
+    # 在第四层将输出并入网络
     skips = [4]
+    # 创建模型
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
     grad_vars = list(model.parameters())
-
+    # 分层采样
     model_fine = None
+    # 精细采样网络
     if args.N_importance > 0:
         model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
                           input_ch=input_ch, output_ch=output_ch, skips=skips,
                           input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+        # 将精细采样网络的参数也放到模型中
         grad_vars += list(model_fine.parameters())
-
+    #
     network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
                                                                 embed_fn=embed_fn,
                                                                 embeddirs_fn=embeddirs_fn,
@@ -424,11 +437,11 @@ def config_parser():
     parser = configargparse.ArgumentParser()
     parser.add_argument('--config', is_config_file=True, 
                         help='config file path')
-    parser.add_argument("--expname", type=str, 
+    parser.add_argument("--expname", type=str,default="test_nerf",
                         help='experiment name')
     parser.add_argument("--basedir", type=str, default='./logs/', 
                         help='where to store ckpts and logs')
-    parser.add_argument("--datadir", type=str, default='./data/llff/fern', 
+    parser.add_argument("--datadir", type=str, default='./data/nerf_synthetic/lego',
                         help='input data directory')
 
     # training options
@@ -440,15 +453,15 @@ def config_parser():
                         help='layers in fine network')
     parser.add_argument("--netwidth_fine", type=int, default=256, 
                         help='channels per layer in fine network')
-    parser.add_argument("--N_rand", type=int, default=32*32*4, 
+    parser.add_argument("--N_rand", type=int, default=32,
                         help='batch size (number of random rays per gradient step)')
     parser.add_argument("--lrate", type=float, default=5e-4, 
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
-    parser.add_argument("--chunk", type=int, default=1024*32, 
+    parser.add_argument("--chunk", type=int, default=1024,
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=1024*64, 
+    parser.add_argument("--netchunk", type=int, default=1024,
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_batching", action='store_true', 
                         help='only take random rays from 1 image at a time')
@@ -458,9 +471,9 @@ def config_parser():
                         help='specific weights npy file to reload for coarse network')
 
     # rendering options
-    parser.add_argument("--N_samples", type=int, default=64, 
+    parser.add_argument("--N_samples", type=int, default=16,
                         help='number of coarse samples per ray')
-    parser.add_argument("--N_importance", type=int, default=0,
+    parser.add_argument("--N_importance", type=int, default=5,
                         help='number of additional fine samples per ray')
     parser.add_argument("--perturb", type=float, default=1.,
                         help='set to 0. for no jitter, 1. for jitter')
@@ -489,7 +502,7 @@ def config_parser():
                         default=.5, help='fraction of img taken for central crops') 
 
     # dataset options
-    parser.add_argument("--dataset_type", type=str, default='llff', 
+    parser.add_argument("--dataset_type", type=str, default='blender',
                         help='options: llff / blender / deepvoxels')
     parser.add_argument("--testskip", type=int, default=8, 
                         help='will load 1/N images from test/val sets, useful for large datasets like deepvoxels')
@@ -532,7 +545,7 @@ def config_parser():
 
 
 def train():
-
+    # 配置参数
     parser = config_parser()
     args = parser.parse_args()
 
@@ -567,13 +580,15 @@ def train():
         print('NEAR FAR', near, far)
 
     elif args.dataset_type == 'blender':
+        # 获取图像，位姿，渲染的位姿，长宽和焦距，划分的索引
         images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
         print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
         i_train, i_val, i_test = i_split
-
         near = 2.
         far = 6.
-
+        # 白色背景，根据不透明度通道对图像进行处理，不透明度只有0和1两个值
+        # 使用像素乘不透明度，相当与乘上一个掩码，保留有色彩的部分，空白的部分现在为黑色
+        # 再对空白区域进行处理，三个通道加上1-透明度，空白的部分现在为黑色，处理之后变为白色，有色彩的部分没有影响
         if args.white_bkgd:
             images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
         else:
@@ -621,8 +636,7 @@ def train():
 
     if args.render_test:
         render_poses = np.array(poses[i_test])
-
-    # Create log dir and copy the config file
+    # 创建日志
     basedir = args.basedir
     expname = args.expname
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
@@ -637,6 +651,7 @@ def train():
             file.write(open(args.config, 'r').read())
 
     # Create nerf model
+    # 构造 nerf 网络
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
     global_step = start
 
@@ -676,15 +691,23 @@ def train():
     use_batching = not args.no_batching
     if use_batching:
         # For random ray batching
+        # 总共有 N * H * W 个像素
+        # 随机取 batch 个
         print('get rays')
         rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
         print('done, concats')
+        # 将图像和坐标以及视角拼接在一起
         rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
+        # 调整各个维度的位置
         rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
+        # 取出用于训练的图像
         rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
+        # reshape
         rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
         rays_rgb = rays_rgb.astype(np.float32)
         print('shuffle rays')
+        # 解释一下，这里的 rays_rgb 存放的是所有像素的世界坐标系方向以及查看它的视角
+        # 打乱所有数据
         np.random.shuffle(rays_rgb)
 
         print('done')
@@ -716,15 +739,14 @@ def train():
             # Random over all images
             batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
+            # 将射线和标签分开存放
             batch_rays, target_s = batch[:2], batch[2]
-
             i_batch += N_rand
             if i_batch >= rays_rgb.shape[0]:
                 print("Shuffle data after an epoch!")
                 rand_idx = torch.randperm(rays_rgb.shape[0])
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
-
         else:
             # Random from one image
             img_i = np.random.choice(i_train)
