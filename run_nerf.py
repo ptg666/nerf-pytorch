@@ -25,7 +25,7 @@ DEBUG = False
 
 
 def batchify(fn, chunk):
-    # 每次前向传播
+    # 返回投喂的数据
     """Constructs a version of 'fn' that applies to smaller batches.
     """
     if chunk is None:
@@ -61,9 +61,14 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
 def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
+    # 每次前向传播要传入粗网络和精网络上的采样点
+    # 按照论文中，每次取1024个像素发射射线
+    # 消耗显存太多，要切开投喂
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
+        # 将射线分批渲染
         ret = render_rays(rays_flat[i:i+chunk], **kwargs)
+        # 将返回值以字典的形式存储
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -120,7 +125,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
         # for forward facing scenes
         rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
 
-    # Create ray batch
+    # 原点和射线的方向
     rays_o = torch.reshape(rays_o, [-1,3]).float()
     rays_d = torch.reshape(rays_d, [-1,3]).float()
 
@@ -285,8 +290,19 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
+    # 按照论文中的公式写出透明度的公式
+    # 1-exp(k*σ) 体密度越大表示透明度越高
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
-
+    # 计算两点间的距离
+    # 计算方法为z_vals 取前 n-1 个和后 n-1 个，让二者相减
+    """
+        z_vals = torch.Tensor([1,2,3,4,5,6,8])
+        dists = z_vals[1:] - z_vals[:-1]
+        output: tensor([1., 1., 1., 1., 1., 2.])
+        其中：
+        z_vals[1:] tensor([2., 3., 4., 5., 6., 8.])
+        z_vals[:6] tensor([1., 2., 3., 4., 5., 6.])
+    """
     dists = z_vals[...,1:] - z_vals[...,:-1]
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
 
@@ -327,7 +343,7 @@ def render_rays(ray_batch,
                 perturb=0.,
                 N_importance=0,
                 network_fine=None,
-                white_bkgd=False,
+                white_bkgd=True,
                 raw_noise_std=0.,
                 verbose=False,
                 pytest=False):
@@ -453,27 +469,27 @@ def config_parser():
                         help='layers in fine network')
     parser.add_argument("--netwidth_fine", type=int, default=256, 
                         help='channels per layer in fine network')
-    parser.add_argument("--N_rand", type=int, default=32,
+    parser.add_argument("--N_rand", type=int, default=32*32*4,
                         help='batch size (number of random rays per gradient step)')
     parser.add_argument("--lrate", type=float, default=5e-4, 
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
-    parser.add_argument("--chunk", type=int, default=1024,
+    parser.add_argument("--chunk", type=int, default=1024*32,
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=1024,
+    parser.add_argument("--netchunk", type=int, default=1024*64,
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_batching", action='store_true', 
                         help='only take random rays from 1 image at a time')
-    parser.add_argument("--no_reload", action='store_true', 
+    parser.add_argument("--no_reload", action='store_true',
                         help='do not reload weights from saved ckpt')
     parser.add_argument("--ft_path", type=str, default=None, 
                         help='specific weights npy file to reload for coarse network')
 
     # rendering options
-    parser.add_argument("--N_samples", type=int, default=16,
+    parser.add_argument("--N_samples", type=int, default=32,
                         help='number of coarse samples per ray')
-    parser.add_argument("--N_importance", type=int, default=5,
+    parser.add_argument("--N_importance", type=int, default=2,
                         help='number of additional fine samples per ray')
     parser.add_argument("--perturb", type=float, default=1.,
                         help='set to 0. for no jitter, 1. for jitter')
@@ -512,7 +528,7 @@ def config_parser():
                         help='options : armchair / cube / greek / vase')
 
     ## blender flags
-    parser.add_argument("--white_bkgd", action='store_true', 
+    parser.add_argument("--white_bkgd", action='store_true',default=True,
                         help='set to render synthetic data on a white bkgd (always use for dvoxels)')
     parser.add_argument("--half_res", action='store_true', 
                         help='load blender synthetic data at 400x400 instead of 800x800')
@@ -534,9 +550,9 @@ def config_parser():
                         help='frequency of console printout and metric loggin')
     parser.add_argument("--i_img",     type=int, default=500, 
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=10000, 
+    parser.add_argument("--i_weights", type=int, default=5000,
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=50000, 
+    parser.add_argument("--i_testset", type=int, default=50000,
                         help='frequency of testset saving')
     parser.add_argument("--i_video",   type=int, default=50000, 
                         help='frequency of render_poses video saving')
@@ -584,6 +600,7 @@ def train():
         images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
         print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
         i_train, i_val, i_test = i_split
+        i_test = i_train
         near = 2.
         far = 6.
         # 白色背景，根据不透明度通道对图像进行处理，不透明度只有0和1两个值

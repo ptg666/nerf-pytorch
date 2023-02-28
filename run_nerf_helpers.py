@@ -193,6 +193,7 @@ def get_rays_np(H, W, K, c2w):
     # 将相机坐标系下的射线转换到世界坐标系下
     rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    # rays_o 为相机原点，每幅图像800*800对应一个相机原点
     rays_o = np.broadcast_to(c2w[:3,-1], np.shape(rays_d))
     return rays_o, rays_d
 
